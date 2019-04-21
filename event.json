@@ -1,0 +1,13 @@
+{
+    "amis": [
+        {
+            "imageName": "Webserver",
+            "sourceImage": "ami-0de53d8956e8dcf80",
+            "bootstrapUrl": "https://raw.githubusercontent.com/bryanlabs/aws-amifactory/master/bootstrap/webserver.sh",
+            "accounts": [
+                "CHANGEME"
+            ],
+            "automationDocument": "DefaultLinuxAmiDocument"
+        }
+    ]
+}

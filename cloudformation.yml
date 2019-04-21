@@ -1,0 +1,1178 @@
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Payload Based AMI Factory.
+Parameters:
+  ImageBuilderVPCId:
+    Description: VPC to run the ImageBuilder In.
+    Type: AWS::EC2::VPC::Id
+  DestSubnetId:
+    Description: Choose a subnet within the ImageBuilderVPC for the Image Builder to run.
+    Type: AWS::EC2::Subnet::Id
+  KeyName:
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the Image Builder.
+    Type: AWS::EC2::KeyPair::KeyName
+  lambdaCodeBucket:
+    Description: S3 Bucket where lambda code is.
+    Type: String
+  Prefix:
+    Description: S3 Prefix where lambda code is.
+    Type: String
+  buildAmilatestVersion:
+    Description: S3Object Version for Lambda Function.
+    Type: String
+  rotateAmilatestVersion:
+    Description: S3Object Version for RotateAmi Function.
+    Type: String
+  AuthorizedKey:
+    Description: An ssh-rsa authorized key, Must not include the prefix (ssh-rsa) or suffix (eg:user@host), just a single string no spaces.
+    Type: String
+  CloudWatchLogsRetentionInDays:
+    AllowedValues:
+    - 1
+    - 3
+    - 5
+    - 7
+    - 14
+    - 30
+    - 60
+    - 90
+    - 120
+    - 150
+    - 180
+    - 365
+    - 400
+    - 545
+    - 731
+    - 1827
+    - 3653
+    Default: 14
+    Description: The number of days log events are kept in CloudWatch Logs
+    Type: Number
+Resources:
+  ImageBuilderSecurityGroup:
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+        - id: W5
+          reason: egress to the world is ok for this temp resource.
+        - id: W29
+          reason: egress to the world is ok for this temp resource.
+        - id: W9
+          reason: ingress from the world is ok for this temp resource.
+        - id: W2
+          reason: ingress from the world is ok for this temp resource.
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow ssh to Image Builder
+      VpcId: !Ref ImageBuilderVPCId
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 22
+        ToPort: 22
+        CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+      - IpProtocol: tcp
+        FromPort: 0
+        ToPort: 65535
+        CidrIp: 0.0.0.0/0
+  AutomationServiceRole:
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action: sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service:
+            - ssm.amazonaws.com
+            - ec2.amazonaws.com
+        Version: '2012-10-17'
+      ManagedPolicyArns:
+      - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonSSMAutomationRole
+      - !Sub arn:${AWS::Partition}:iam::aws:policy/AWSLambdaFullAccess
+      Path: /
+      Policies:
+      - PolicyDocument:
+          Statement:
+          - Action:
+            - iam:PassRole
+            Effect: Allow
+            Resource:
+            - !GetAtt ManagedInstanceRole.Arn
+          Version: '2012-10-17'
+        PolicyName: passrole
+    Type: AWS::IAM::Role
+  IamInstanceProfileName:
+    Properties:
+      Path: /
+      Roles:
+      - !Ref ManagedInstanceRole
+    Type: AWS::IAM::InstanceProfile
+  ManagedInstanceRole:
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action: sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service:
+            - ssm.amazonaws.com
+            - ec2.amazonaws.com
+        Version: '2012-10-17'
+      ManagedPolicyArns:
+      - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+      - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonSSMReadOnlyAccess
+      Path: /
+    Type: AWS::IAM::Role
+  S3Bucket:
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+        - ServerSideEncryptionByDefault:
+            SSEAlgorithm: AES256
+    Type: AWS::S3::Bucket
+  buildAmiFunction:
+    Properties:
+      Code:
+        S3Bucket: !Ref lambdaCodeBucket
+        S3Key: !Sub ${Prefix}/buildAmi.zip
+        S3ObjectVersion: !Ref buildAmilatestVersion
+      Description: Builds AMIs via SSM Automation Documents.
+      Environment:
+        Variables:
+          AUTOMATIONASSUMEROLE: !GetAtt AutomationServiceRole.Arn
+          DESTSUBNETID: !Ref DestSubnetId
+          IAMINSTANCEPROFILENAME: !Ref IamInstanceProfileName
+          INSTANCETYPE: t2.medium
+          KEYNAME: !Ref KeyName
+          MANAGEDINSTANCEROLE: !Ref ManagedInstanceRole
+          PREFIX: !Ref AWS::StackName
+          ROTATEAMIFUNCTION: !Ref rotateAmiFunction
+          S3OUTPUT: !Ref S3Bucket
+          SECURITYGROUPID: !GetAtt ImageBuilderSecurityGroup.GroupId
+          DEFAULTLINUXAMIDOCUMENT: !Ref DefaultLinuxAmiDocument
+          DEFAULTWINDOWSAMIDOCUMENT: !Ref DefaultWindowsAmiDocument
+          AUTHORIZEDKEY: !Ref AuthorizedKey
+      Handler: index.lambda_handler
+      MemorySize: 2048
+      Role: !GetAtt buildAmiLambdaRole.Arn
+      Runtime: python3.6
+      Timeout: 900
+      VpcConfig:
+        SecurityGroupIds:
+        - !GetAtt ImageBuilderSecurityGroup.GroupId
+        SubnetIds:
+        - !Ref DestSubnetId
+    Type: AWS::Lambda::Function
+  runCommandLogGroup:
+    Properties:
+      LogGroupName: /aws/ssm/runCommand
+      RetentionInDays: !Ref CloudWatchLogsRetentionInDays
+    Type: AWS::Logs::LogGroup
+  buildAmiFunctionLogGroup:
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${buildAmiFunction}
+      RetentionInDays: !Ref CloudWatchLogsRetentionInDays
+    Type: AWS::Logs::LogGroup
+  buildAmiLambdaRole:
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action: sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+        Version: '2012-10-17'
+      ManagedPolicyArns:
+      - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+    Type: AWS::IAM::Role
+  buildAmiPolicy:
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+        - id: W13
+          reason: Wildcards are ok for Automation Documents.
+    Properties:
+      PolicyDocument:
+        Statement:
+        - Action: ssm:StartAutomationExecution
+          Effect: Allow
+          Resource: '*'
+        - Action: iam:PassRole
+          Effect: Allow
+          Resource: !GetAtt AutomationServiceRole.Arn
+        Version: '2012-10-17'
+      Roles:
+      - !Ref buildAmiLambdaRole
+    Type: AWS::IAM::ManagedPolicy
+  rotateAmiFunction:
+    Properties:
+      Code:
+        S3Bucket: !Ref lambdaCodeBucket
+        S3Key: !Sub ${Prefix}/rotateAmi.zip
+        S3ObjectVersion: !Ref rotateAmilatestVersion
+      Description: Keeps latest AMI / snapshot, Shares Latest AMI, deletes / deregisters
+        old snapshots/amis.
+      Environment:
+        Variables:
+          LINUXDOCUMENT: !Ref DefaultLinuxAmiDocument
+          WINDOWSDOCUMENT: !Ref DefaultWindowsAmiDocument
+      Handler: index.lambda_handler
+      MemorySize: 2048
+      Role: !GetAtt rotateAmiLambdaRole.Arn
+      Runtime: python3.6
+      Timeout: 900
+    Type: AWS::Lambda::Function
+  rotateAmiFunctionLogGroup:
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${rotateAmiFunction}
+      RetentionInDays: !Ref CloudWatchLogsRetentionInDays
+    Type: AWS::Logs::LogGroup
+  rotateAmiLambdaRole:
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action: sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+        Version: '2012-10-17'
+      ManagedPolicyArns:
+      - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+    Type: AWS::IAM::Role
+  rotateAmiPolicy:
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+        - id: W13
+          reason: Wildcards for log streams are totally fine, and ModifyImageAttribute
+            supports all resources.
+    Properties:
+      PolicyDocument:
+        Statement:
+        - Action: logs:CreateLogGroup
+          Effect: Allow
+          Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${rotateAmiFunction}
+        - Action: logs:CreateLogStream
+          Effect: Allow
+          Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*
+        - Action:
+          - ec2:DescribeImages
+          - ec2:DeregisterImage
+          - ec2:DeleteSnapshot
+          - ec2:ModifyImageAttribute
+          Effect: Allow
+          Resource: '*'
+        Version: '2012-10-17'
+      Roles:
+      - !Ref rotateAmiLambdaRole
+    Type: AWS::IAM::ManagedPolicy
+  DefaultLinuxAmiDocument:
+    Type: AWS::SSM::Document
+    Properties:
+      DocumentType: Automation
+      Content: {
+        "schemaVersion": "0.3",
+        "description": "Creates an Image based on a SourceAmi, Installs SSM, Cloudwatchlogs Agent, Latest OS patches, Bakes a ssh-key, and installs a custom bootstrap.",
+        "assumeRole": "{{AutomationAssumeRole}}",
+        "parameters": {
+          "KeyName": {
+            "type": "String",
+            "description": "A Key to use for ssh."
+          },
+          "Accounts": {
+            "type": "String",
+            "description": "A List of Accounts to share the AMI with."
+          },
+          "S3Output": {
+            "type": "String",
+            "description": "A Bucket to store the automation logs."
+          },
+          "Prefix": {
+            "type": "String",
+            "description": "A Resource Name Prefix."
+          },
+          "RotateAMIFunction": {
+            "type": "String",
+            "description": "The Name of the Function that Rotates the AMI."
+          },
+          "AmiType": {
+            "type": "String",
+            "description": "Name of the AMI, EG Amazon, would create PREFIX_Base_AMI_Amazon"
+          },
+          "SourceAmiId": {
+            "type": "String",
+            "description": "(Required) The source Amazon Machine Image ID."
+          },
+          "DestSubnetId": {
+            "type": "String",
+            "description": "(Required) The destination SubnetIdID."
+          },
+          "SecurityGroupId": {
+            "type": "String",
+            "description": "(Required) The destination SecurityGroupId."
+          },
+          "IamInstanceProfileName": {
+            "type": "String",
+            "description": "(Required) The name of the instance profile that enables Systems Manager (SSM) to manage the instance."
+          },
+          "AutomationAssumeRole": {
+            "type": "String",
+            "description": "(Required) The ARN of the role that allows Automation to perform the actions on your behalf."
+          },
+          "TargetAmiName": {
+            "type": "String",
+            "description": "(Optional) The name of the new AMI that will be created. Default is a system-generated string including the source AMI id, and the creation time and date.",
+            "default": "{{Prefix}}_AMI_{{AmiType}}_{{global:DATE_TIME}}"
+          },
+          "AuthorizedKey": {
+            "type": "String",
+            "description": "An ssh-rsa string to add to AMIs, Do NOT include the prefix (ssh-rsa) or suffic (eg: user@host).",
+            "default": "CHANGEME"
+          },
+          "InstanceType": {
+            "type": "String",
+            "description": "(Optional) Type of instance to launch as the workspace host. Instance types vary by region. Default is c3.large."
+          },
+          "PreUpdateScript": {
+            "type": "String",
+            "description": "(Optional) URL of a script to run before updates are applied. Default (\"none\") is to not run a script.",
+            "default": "none"
+          },
+          "PostUpdateScript": {
+            "type": "String",
+            "description": "(Optional) URL of a script to run after package updates are applied. Default (\"none\") is to not run a script.",
+            "default": "none"
+          },
+          "IncludePackages": {
+            "type": "String",
+            "description": "(Optional) Only update these named packages. By default (\"all\"), all available updates are applied.",
+            "default": "all"
+          },
+          "ExcludePackages": {
+            "type": "String",
+            "description": "(Optional) Names of packages to hold back from updates, under all conditions. By default (\"none\"), no package is excluded.",
+            "default": "grub-*"
+          }
+        },
+        "mainSteps": [
+          {
+            "name": "launchInstance",
+            "action": "aws:runInstances",
+            "maxAttempts": 3,
+            "timeoutSeconds": 1200,
+            "onFailure": "Abort",
+            "inputs": {
+              "ImageId": "{{SourceAmiId}}",
+              "InstanceType": "{{InstanceType}}",
+              "SubnetId": "{{DestSubnetId}}",
+              "KeyName": "{{KeyName}}",
+              "SecurityGroupIds": [
+                "{{SecurityGroupId}}"
+              ],
+              "UserData": "IyEvYmluL2Jhc2gNCg0KZnVuY3Rpb24gZ2V0X2NvbnRlbnRzKCkgew0KICAgIGlmIFsgLXggIiQod2hpY2ggY3VybCkiIF07IHRoZW4NCiAgICAgICAgY3VybCAtcyAtZiAiJDEiDQogICAgZWxpZiBbIC14ICIkKHdoaWNoIHdnZXQpIiBdOyB0aGVuDQogICAgICAgIHdnZXQgIiQxIiAtTyAtDQogICAgZWxzZQ0KICAgICAgICBkaWUgIk5vIGRvd25sb2FkIHV0aWxpdHkgKGN1cmwsIHdnZXQpIg0KICAgIGZpDQp9DQoNCnJlYWRvbmx5IElERU5USVRZX1VSTD0iaHR0cDovLzE2OS4yNTQuMTY5LjI1NC8yMDE2LTA2LTMwL2R5bmFtaWMvaW5zdGFuY2UtaWRlbnRpdHkvZG9jdW1lbnQvIg0KcmVhZG9ubHkgVFJVRV9SRUdJT049JChnZXRfY29udGVudHMgIiRJREVOVElUWV9VUkwiIHwgYXdrIC1GXCIgJy9yZWdpb24vIHsgcHJpbnQgJDQgfScpDQpyZWFkb25seSBERUZBVUxUX1JFR0lPTj0idXMtZWFzdC0xIg0KcmVhZG9ubHkgUkVHSU9OPSIke1RSVUVfUkVHSU9OOi0kREVGQVVMVF9SRUdJT059Ig0KDQpyZWFkb25seSBTQ1JJUFRfTkFNRT0iYXdzLWluc3RhbGwtc3NtLWFnZW50Ig0KcmVhZG9ubHkgU0NSSVBUX1VSTD0iaHR0cHM6Ly9hd3Mtc3NtLWRvd25sb2Fkcy0kUkVHSU9OLnMzLmFtYXpvbmF3cy5jb20vc2NyaXB0cy8kU0NSSVBUX05BTUUiDQoNCmNkIC90bXANCkZJTEVfU0laRT0wDQpNQVhfUkVUUllfQ09VTlQ9Mw0KUkVUUllfQ09VTlQ9MA0KDQp3aGlsZSBbICRSRVRSWV9DT1VOVCAtbHQgJE1BWF9SRVRSWV9DT1VOVCBdIDsgZG8NCiAgZWNobyBBV1MtVXBkYXRlTGludXhBbWk6IERvd25sb2FkaW5nIHNjcmlwdCBmcm9tICRTQ1JJUFRfVVJMDQogIGdldF9jb250ZW50cyAiJFNDUklQVF9VUkwiID4gIiRTQ1JJUFRfTkFNRSINCiAgRklMRV9TSVpFPSQoZHUgLWsgL3RtcC8kU0NSSVBUX05BTUUgfCBjdXQgLWYxKQ0KICBlY2hvIEFXUy1VcGRhdGVMaW51eEFtaTogRmluaXNoZWQgZG93bmxvYWRpbmcgc2NyaXB0LCBzaXplOiAkRklMRV9TSVpFDQogIGlmIFsgJEZJTEVfU0laRSAtZ3QgMCBdOyB0aGVuDQogICAgYnJlYWsNCiAgZWxzZQ0KICAgIGlmIFtbICRSRVRSWV9DT1VOVCAtbHQgTUFYX1JFVFJZX0NPVU5UIF1dOyB0aGVuDQogICAgICBSRVRSWV9DT1VOVD0kKChSRVRSWV9DT1VOVCsxKSk7DQogICAgICBlY2hvIEFXUy1VcGRhdGVMaW51eEFtaTogRmlsZVNpemUgaXMgMCwgcmV0cnlDb3VudDogJFJFVFJZX0NPVU5UDQogICAgZmkNCiAgZmkgDQpkb25lDQoNCmlmIFsgJEZJTEVfU0laRSAtZ3QgMCBdOyB0aGVuDQogIGNobW9kICt4ICIkU0NSSVBUX05BTUUiDQogIGVjaG8gQVdTLVVwZGF0ZUxpbnV4QW1pOiBSdW5uaW5nIFVwZGF0ZVNTTUFnZW50IHNjcmlwdCBub3cgLi4uLg0KICAuLyIkU0NSSVBUX05BTUUiIC0tcmVnaW9uICIkUkVHSU9OIg0KZWxzZQ0KICBlY2hvIEFXUy1VcGRhdGVMaW51eEFtaTogVW5hYmxlIHRvIGRvd25sb2FkIHNjcmlwdCwgcXVpdHRpbmcgLi4uLg0KZmkNCg==IyEvYmluL2Jhc2gNCg0KZnVuY3Rpb24gZ2V0X2NvbnRlbnRzKCkgew0KICAgIGlmIFsgLXggIiQod2hpY2ggY3VybCkiIF07IHRoZW4NCiAgICAgICAgY3VybCAtcyAtZiAiJDEiDQogICAgZWxpZiBbIC14ICIkKHdoaWNoIHdnZXQpIiBdOyB0aGVuDQogICAgICAgIHdnZXQgIiQxIiAtTyAtDQogICAgZWxzZQ0KICAgICAgICBkaWUgIk5vIGRvd25sb2FkIHV0aWxpdHkgKGN1cmwsIHdnZXQpIg0KICAgIGZpDQp9DQoNCnJlYWRvbmx5IElERU5USVRZX1VSTD0iaHR0cDovLzE2OS4yNTQuMTY5LjI1NC8yMDE2LTA2LTMwL2R5bmFtaWMvaW5zdGFuY2UtaWRlbnRpdHkvZG9jdW1lbnQvIg0KcmVhZG9ubHkgVFJVRV9SRUdJT049JChnZXRfY29udGVudHMgIiRJRCMVElUWV9VUkwiIHwgYXdrIC1GXCIgJy9yZWdpb24vIHsgcHJpbnQgJDQgfScpDQpyZWFkb25seSBERUZBVUxUX1JFR0lPTj0idXMtZWFzdC0xIg0KcmVhZG9ubHkgUkVHSU9OPSIke1RSVUVfUkVHSU9OOi0kREVGQVVMVF9SRUdJT059Ig0KDQpyZWFkb25seSBTQ1JJUFRfTkFNRT0iYXdzLWluc3RhbGwtc3NtLWFnZW50Ig0KcmVhZG9ubHkgU0NSSVBUX1VSTD0iaHR0cHM6Ly9hd3Mtc3NtLWRvd25sb2Fkcy0kUkVHSU9OLnMzLmFtYXpvbmF3cy5jb20vc2NyaXB0cy8kU0NSSVBUX05BTUUiDQoNCmNkIC90bXANCkZJTEVfU0laRT0wDQpNQVhfUkVUUllfQ09VTlQ9Mw0KUkVUUllfQ09VTlQ9MA0KDQp3aGlsZSBbICRSRVRSWV9DT1VOVCAtbHQgJE1BWF9SRVRSWV9DT1VOVCBdIDsgZG8NCiAgZWNobyBBV1MtVXBkYXRlTGludXhBbWk6IERvd25sb2FkaW5nIHNjcmlwdCBmcm9tICRTQ1JJUFRfVVJMDQogIGdldF9jb250ZW50cyAiJFNDUklQVF9VUkwiID4gIiRTQ1JJUFRfTkFNRSINCiAgRklMRV9TSVpFPSQoZHUgLWsgL3RtcC8kU0NSSVBUX05BTUUgfCBjdXQgLWYxKQ0KICBlY2hvIEFXUy1VcGRhdGVMaW51eEFtaTogRmluaXNoZWQgZG93bmxvYWRpbmcgc2NyaXB0LCBzaXplOiAkRklMRV9TSVpFDQogIGlmIFsgJEZJTEVfU0laRSAtZ3QgMCBdOyB0aGVuDQogICAgYnJlYWsNCiAgZWxzZQ0KICAgIGlmIFtbICRSRVRSWV9DT1VOVCAtbHQgTUFYX1JFVFJZX0NPVU5UIF1dOyB0aGVuDQogICAgICBSRVRSWV9DT1VOVD0kKChSRVRSWV9DT1VOVCsxKSk7DQogICAgICBlY2hvIEFXUy1VcGRhdGVMaW51eEFtaTogRmlsZVNpemUgaXMgMCwgcmV0cnlDb3VudDogJFJFVFJZX0NPVU5UDQogICAgZmkNCiAgZmkgDQpkb25lDQoNCmlmIFsgJEZJTEVfU0laRSAtZ3QgMCBdOyB0aGVuDQogIGNobW9kICt4ICIkU0NSSVBUX05BTUUiDQogIGVjaG8gQVdTLVVwZGF0ZUxpbnV4QW1pOiBSdW5uaW5nIFVwZGF0ZVNTTUFnZW50IHNjcmlwdCBub3cgLi4uLg0KICAuLyIkU0NSSVBUX05BTUUiIC0tcmVnaW9uICIkUkVHSU9OIg0KZWxzZQ0KICBlY2hvIEFXUy1VcGRhdGVMaW51eEFtaTogVW5hYmxlIHRvIGRvd25sb2FkIHNjcmlwdCwgcXVpdHRpbmcgLi4uLg0KZmkNCg==",
+              "MinInstanceCount": 1,
+              "MaxInstanceCount": 1,
+              "IamInstanceProfileName": "{{IamInstanceProfileName}}",
+              "TagSpecifications": [
+                {
+                  "ResourceType": "instance",
+                  "Tags": [
+                    {
+                      "Key": "LaunchedBy",
+                      "Value": "{{Prefix}} AMI Factory"
+                    },
+                    {
+                      "Key": "Name",
+                      "Value": "{{Prefix}}_{{AmiType}}_Automation_runner"
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "name": "verifySsmInstall",
+            "action": "aws:runCommand",
+            "maxAttempts": 2,
+            "timeoutSeconds": 120,
+            "onFailure": "Abort",
+            "inputs": {
+              "DocumentName": "AWS-RunShellScript",
+              "OutputS3BucketName": "{{S3Output}}",
+              "OutputS3KeyPrefix": "automations",
+              "CloudWatchOutputConfig" : { 
+                "CloudWatchLogGroupName": "/aws/ssm/runCommand",
+                "CloudWatchOutputEnabled": true
+              },
+              "InstanceIds": [
+                "{{launchInstance.InstanceIds}}"
+              ],
+              "Parameters": {
+                "commands": [
+                  "hostname"
+                ]
+              }
+            }
+          },
+          {
+            "name": "InstallAmazonCloudWatchAgent",
+            "action": "aws:runCommand",
+            "maxAttempts": 3,
+            "onFailure": "Abort",
+            "timeoutSeconds": 600,
+            "inputs": {
+              "DocumentName": "AWS-ConfigureAWSPackage",
+              "OutputS3BucketName": "{{S3Output}}",
+              "OutputS3KeyPrefix": "automations",
+              "CloudWatchOutputConfig" : { 
+                "CloudWatchLogGroupName": "/aws/ssm/runCommand",
+                "CloudWatchOutputEnabled": true
+              },
+              "InstanceIds": [
+                "{{launchInstance.InstanceIds}}"
+              ],
+              "Parameters": {
+                "name": "AmazonCloudWatchAgent",
+                "action": "Install"
+              }
+            }
+          },
+          {
+            "name": "Bake_ssh_authorizedkeys",
+            "action": "aws:runCommand",
+            "maxAttempts": 2,
+            "timeoutSeconds": 120,
+            "onFailure": "Abort",
+            "inputs": {
+              "DocumentName": "AWS-RunShellScript",
+              "OutputS3BucketName": "{{S3Output}}",
+              "OutputS3KeyPrefix": "automations",
+              "CloudWatchOutputConfig" : { 
+                "CloudWatchLogGroupName": "/aws/ssm/runCommand",
+                "CloudWatchOutputEnabled": true
+              },
+              "InstanceIds": [
+                "{{launchInstance.InstanceIds}}"
+              ],
+              "Parameters": {
+                "commands": [
+                  "set -x",
+                  "AuthorizedKey=\"ssh-rsa {{AuthorizedKey}} AmiFactory\"",
+                  "function add_authorized_key() { mkdir -p /home/$1/.ssh ; if ! grep -qFx \"$2\" /home/$1/.ssh/authorized_keys 2>/dev/null ; then echo \"$2\" >> /home/$1/.ssh/authorized_keys && echo \"add_authorized_key: $AuthorizedKey\" ; fi }",
+                  "useradd -m -p \"$(perl -e 'print crypt($ARGV[0], \"password\")' $password)\" local.adm",
+                  "add_authorized_key local.adm \"$AuthorizedKey\"",
+                  "ENTRY=\"local.adm ALL=(ALL) NOPASSWD:ALL\" && if ! grep -qFx \"$ENTRY\" /etc/sudoers.d/99-init-users 2>/dev/null ; then echo \"$ENTRY\" >> /etc/sudoers.d/99-init-users && echo 'Added local.adm to sudoers (/etc/sudoers.d/99-init-users)' ; fi",
+                  "ENTRY=\"%domain\\ users ALL=(ALL) NOPASSWD:ALL\" && if ! grep -qFx \"$ENTRY\" /etc/sudoers.d/99-init-users 2>/dev/null ; then echo \"$ENTRY\" >> /etc/sudoers.d/99-init-users && echo 'Added domain users to sudoers (/etc/sudoers.d/99-init-users)' ; fi",
+                  "cat /etc/sudoers.d/99-init-users",
+                ]
+              }
+            }
+          },
+          {
+            "name": "updateOSSoftware",
+            "action": "aws:runCommand",
+            "maxAttempts": 2,
+            "timeoutSeconds": 600,
+            "onFailure": "Abort",
+            "inputs": {
+              "DocumentName": "AWS-RunShellScript",
+              "OutputS3BucketName": "{{S3Output}}",
+              "OutputS3KeyPrefix": "automations",
+              "CloudWatchOutputConfig" : { 
+                "CloudWatchLogGroupName": "/aws/ssm/runCommand",
+                "CloudWatchOutputEnabled": true
+              },
+              "InstanceIds": [
+                "{{launchInstance.InstanceIds}}"
+              ],
+              "Parameters": {
+                "commands": [
+                  "set -e",
+                  "[ -x \"$(which wget)\" ] && get_contents='wget $1 -O -'",
+                  "[ -x \"$(which curl)\" ] && get_contents='curl -s -f $1'",
+                  "if [[ {{global:REGION}} == 'us-gov-'* ]]",
+                  "then",
+                  "eval $get_contents https://s3-fips-{{global:REGION}}.amazonaws.com/aws-ssm-downloads-{{global:REGION}}/scripts/aws-update-linux-instance > /var/lib/amazon/ssm/aws-update-linux-instance",
+                  "elif [[ {{global:REGION}} == 'cn-'* ]]",
+                  "then",
+                  "eval $get_contents https://aws-ssm-downloads-{{global:REGION}}.s3.{{global:REGION}}.amazonaws.com.cn/scripts/aws-update-linux-instance > /var/lib/amazon/ssm/aws-update-linux-instance",
+                  "else",
+                  "eval $get_contents https://aws-ssm-downloads-{{global:REGION}}.s3.amazonaws.com/scripts/aws-update-linux-instance > /var/lib/amazon/ssm/aws-update-linux-instance",
+                  "fi",
+                  "chmod +x /var/lib/amazon/ssm/aws-update-linux-instance",
+                  "while ps aux |grep -e 'apt|yum|dnf|dpkg|rpm' |grep -v grep ; do logger \"Waiting for the package manager to be available\" ; sleep 3; done",
+                  "export DEBIAN_FRONTEND=noninteractive",
+                  "/var/lib/amazon/ssm/aws-update-linux-instance --pre-update-script '{{PreUpdateScript}}' --post-update-script '{{PostUpdateScript}}' --include-packages '{{IncludePackages}}' --exclude-packages '{{ExcludePackages}}' 2>&1 | tee /tmp/aws-update-linux-instance.log"
+                ]
+              }
+            }
+          },
+          {
+            "name": "stopInstance",
+            "action": "aws:changeInstanceState",
+            "maxAttempts": 2,
+            "timeoutSeconds": 180,
+            "onFailure": "Abort",
+            "inputs": {
+              "InstanceIds": [
+                "{{launchInstance.InstanceIds}}"
+              ],
+              "DesiredState": "stopped"
+            }
+          },
+          {
+            "name": "createImage",
+            "action": "aws:createImage",
+            "maxAttempts": 3,
+            "onFailure": "Abort",
+            "inputs": {
+              "InstanceId": "{{launchInstance.InstanceIds}}",
+              "ImageName": "{{TargetAmiName}}",
+              "NoReboot": true,
+              "ImageDescription": "AMI Generated by EC2 Automation on {{global:DATE_TIME}} from {{SourceAmiId}}"
+            }
+          },
+          {
+            "name": "tagImage",
+            "action": "aws:createTags",
+            "maxAttempts": 2,
+            "onFailure": "Abort",
+            "inputs": {
+              "ResourceType": "EC2",
+              "ResourceIds": [
+                "{{createImage.ImageId}}"
+              ],
+              "Tags": [
+                {
+                  "Key": "Name",
+                  "Value": "{{Prefix}}_AMI_{{AmiType}}_Latest"
+                }
+              ]
+            }
+          },
+          {
+            "name": "terminateInstance",
+            "action": "aws:changeInstanceState",
+            "maxAttempts": 2,
+            "onFailure": "Abort",
+            "inputs": {
+              "InstanceIds": [
+                "{{launchInstance.InstanceIds}}"
+              ],
+              "DesiredState": "terminated"
+            }
+          },
+          {
+            "name": "Lambda_Rotate_AMI",
+            "action": "aws:invokeLambdaFunction",
+            "timeoutSeconds": 120,
+            "maxAttempts": 3,
+            "onFailure": "Continue",
+            "inputs": {
+              "FunctionName": "{{RotateAMIFunction}}",
+              "Payload": "{\"aminame\":\"{{Prefix}}_AMI_{{AmiType}}_\",\"accounts\":\"{{Accounts}}\"}"
+            }
+          }
+        ],
+        "outputs": [
+          "createImage.ImageId"
+        ]
+      }
+      Tags:
+      - Key: Name
+        Value: UpdateLinuxAmiDocument
+  DefaultWindowsAmiDocument:
+    Type: AWS::SSM::Document
+    Properties:
+      DocumentType: Automation
+      Content: {
+        "schemaVersion": "0.3",
+        "description": "Updates a Microsoft Windows AMI. By default it will install all Windows updates, Amazon software, and Amazon drivers, and custom bootstrap code. It will then sysprep and create a new AMI. Supports Windows Server 2008 R2 and greater.",
+        "assumeRole": "{{ AutomationAssumeRole }}",
+        "parameters": {
+            "KeyName": {
+            "type": "String",
+            "description": "A Key to use for ssh."
+            },
+            "Accounts": {
+            "type": "String",
+            "description": "A List of Accounts to share the AMI with."
+            },
+            "S3Output": {
+            "type": "String",
+            "description": "A Bucket to store the automation logs."
+            },
+            "Prefix": {
+            "type": "String",
+            "description": "A Resource Name Prefix.",
+            },
+            "RotateAMIFunction": {
+            "type": "String",
+            "description": "The Name of the Function that Rotates the AMI."
+            },
+            "AmiType": {
+              "type": "String",
+              "description": "Name of the AMI, EG Amazon, would create PREFIX_Base_AMI_Amazon"
+            },
+            "SourceAmiId": {
+              "type": "String",
+              "description": "(Required) The source Amazon Machine Image ID."
+            },
+            "DestSubnetId": {
+            "type": "String",
+            "description": "(Required) The destination SubnetIdID."
+            },
+            "SecurityGroupId": {
+            "type": "String",
+            "description": "(Required) The destination SecurityGroupId."
+            },
+            "AuthorizedKey": {
+            "type": "String",
+            "description": "An ssh-rsa string to add to AMIs, Do NOT include the prefix (ssh-rsa) or suffic (eg: user@host).",
+            "default": "CHANGEME"
+            },
+            "IamInstanceProfileName": {
+            "type": "String",
+            "description": "(Required) The name of the instance profile that enables Systems Manager (SSM) to manage the instance.",
+            },
+            "AutomationAssumeRole": {
+              "type": "String",
+              "description": "(Required) The ARN of the role that allows Automation to perform the actions on your behalf.",
+            },
+            "TargetAmiName": {
+              "type": "String",
+              "description": "(Optional) The name of the new AMI that will be created. Default is a system-generated string including the source AMI id, and the creation time and date.",
+              "default": "{{Prefix}}_AMI_{{AmiType}}_{{global:DATE_TIME}}"
+            },
+            "InstanceType": {
+              "type": "String",
+              "description": "(Optional) Type of instance to launch as the workspace host. Instance types vary by region. Default is t2.medium.",
+            },
+            "IncludeKbs": {
+              "type": "String",
+              "description": "(Optional) Specify one or more Microsoft Knowledge Base (KB) article IDs to include. You can install multiple IDs using comma-separated values. Valid formats: KB9876543 or 9876543.",
+              "default": ""
+            },
+            "ExcludeKbs": {
+              "type": "String",
+              "description": "(Optional) Specify one or more Microsoft Knowledge Base (KB) article IDs to exclude. You can exclude multiple IDs using comma-separated values. Valid formats: KB9876543 or 9876543.",
+              "default": ""
+            },
+            "Categories": {
+              "type": "String",
+              "description": "(Optional) Specify one or more update categories. You can filter categories using comma-separated values. Options: Application, Connectors, CriticalUpdates, DefinitionUpdates, DeveloperKits, Drivers, FeaturePacks, Guidance, Microsoft, SecurityUpdates, ServicePacks, Tools, UpdateRollups, Updates. Valid formats include a single entry, for example: CriticalUpdates. Or you can specify a comma separated list: CriticalUpdates,SecurityUpdates. NOTE: There cannot be any spaces around the commas.",
+              "default": ""
+            },
+            "SeverityLevels": {
+              "type": "String",
+              "description": "(Optional) Specify one or more MSRC severity levels associated with an update. You can filter severity levels using comma-separated values. By default patches for all security levels are selected. If value supplied, the update list is filtered by those values. Options: Critical, Important, Low, Moderate or Unspecified. Valid formats include a single entry, for example: Critical. Or, you can specify a comma separated list: Critical,Important,Low.",
+              "default": ""
+            },
+            "PublishedDaysOld": {
+              "type": "String",
+              "default": "",
+              "description": "(Optional) Specify the amount of days old the updates must be from the published date.  For example, if 10 is specified, any updates that were found during the Windows Update search that have been published 10 or more days ago will be returned."
+            },
+            "PublishedDateAfter": {
+              "type": "String",
+              "default": "",
+              "description": "(Optional) Specify the date that the updates should be published after.  For example, if 01/01/2017 is specified, any updates that were found during the Windows Update search that have been published on or after 01/01/2017 will be returned."
+            },
+            "PublishedDateBefore": {
+              "type": "String",
+              "default": "",
+              "description": "(Optional) Specify the date that the updates should be published before.  For example, if 01/01/2017 is specified, any updates that were found during the Windows Update search that have been published on or before 01/01/2017 will be returned."
+            },
+            "PreUpdateScript": {
+              "type": "String",
+              "description": "(Optional) A script provided as a string. It will execute prior to installing OS updates.",
+              "default": ""
+            },
+            "PostUpdateScript": {
+              "type": "String",
+              "description": "(Optional) A script provided as a string. It will execute after installing OS updates.",
+              "default": ""
+            }
+        },
+        "mainSteps": [
+            {
+              "name": "LaunchInstance",
+              "action": "aws:runInstances",
+              "timeoutSeconds": 1800,
+              "maxAttempts": 3,
+              "onFailure": "Abort",
+              "inputs": {
+                  "ImageId": "{{ SourceAmiId  }}",
+                  "InstanceType": "{{ InstanceType }}",
+                  "MinInstanceCount": 1,
+                  "MaxInstanceCount": 1,
+                  "IamInstanceProfileName": "{{ IamInstanceProfileName }}",
+                  "TagSpecifications": [
+                    {
+                        "ResourceType": "instance",
+                        "Tags": [
+                          {
+                              "Key": "LaunchedBy",
+                              "Value": "{{Prefix}} AMI Factory"
+                          },
+                          {
+                              "Key": "Name",
+                              "Value": "{{Prefix}}_{{AmiType}}_Automation_runner"
+                          }
+                        ]
+                    }
+                  ],
+                  "KeyName": "{{ KeyName }}",
+                  "SubnetId": "{{ DestSubnetId }}",
+                  "SecurityGroupIds": [
+                    "{{SecurityGroupId}}"
+                  ]
+              }
+            },
+            {
+              "name": "OSCompatibilityCheck",
+              "action": "aws:runCommand",
+              "maxAttempts": 3,
+              "onFailure": "Abort",
+              "timeoutSeconds": 7200,
+              "inputs": {
+                  "DocumentName": "AWS-RunPowerShellScript",
+                  "OutputS3BucketName": "{{S3Output}}",
+                  "OutputS3KeyPrefix": "automations",
+                  "CloudWatchOutputConfig" : { 
+                    "CloudWatchLogGroupName": "/aws/ssm/runCommand",
+                    "CloudWatchOutputEnabled": true
+                  },
+                  "InstanceIds": [
+                    "{{LaunchInstance.InstanceIds}}"
+                  ],
+                  "Parameters": {
+                    "executionTimeout": "7200",
+                    "commands": [
+                        "[System.Version]$osversion = [System.Environment]::OSVersion.Version",
+                        "if(($osversion.Major -eq 6 -and $osversion.Minor -ge 1) -or ($osversion.Major -ge 10)) {",
+                        "  Write-Host 'This OS is supported for use with this automation document.'",
+                        "} else {",
+                        "  Write-Host 'This OS is not supported for use with this automation document.'",
+                        "  exit -1",
+                        "}"
+                    ]
+                  }
+              }
+            },
+            {
+              "name": "RunPreUpdateScript",
+              "action": "aws:runCommand",
+              "maxAttempts": 3,
+              "onFailure": "Abort",
+              "timeoutSeconds": 300,
+              "inputs": {
+                  "DocumentName": "AWS-RunPowerShellScript",
+                  "OutputS3BucketName": "{{S3Output}}",
+                  "OutputS3KeyPrefix": "automations",
+                  "CloudWatchOutputConfig" : { 
+                    "CloudWatchLogGroupName": "/aws/ssm/runCommand",
+                    "CloudWatchOutputEnabled": true
+                  },
+                  "InstanceIds": [
+                    "{{ LaunchInstance.InstanceIds }}"
+                  ],
+                  "Parameters": {
+                    "commands": [
+                        "add-type @'",
+                        "using System.Net;",
+                        "using System.Security.Cryptography.X509Certificates;",
+                        "public class TrustAllCertsPolicy : ICertificatePolicy {",
+                        "public bool CheckValidationResult(",
+                        "ServicePoint srvPoint, X509Certificate certificate,",
+                        "WebRequest request, int certificateProblem) {",
+                        "return true;",
+                        "}",
+                        "}",
+                        "'@",
+                        "$AllProtocols = [System.Net.SecurityProtocolType]'Tls11,Tls12'",
+                        "[System.Net.ServicePointManager]::SecurityProtocol = $AllProtocols",
+                        "[System.Net.ServicePointManager]::CertificatePolicy = New-Object TrustAllCertsPolicy",
+                        "(New-Object System.Net.WebClient).DownloadFile('{{ PreUpdateScript }}', 'bootstrap.ps1')",
+                        "powershell.exe 'bootstrap.ps1'"
+                    ]
+                  }
+              }
+            },
+            {
+              "name": "UpdateEC2Config",
+              "action": "aws:runCommand",
+              "maxAttempts": 3,
+              "onFailure": "Abort",
+              "timeoutSeconds": 7200,
+              "inputs": {
+                  "DocumentName": "AWS-RunPowerShellScript",
+                  "OutputS3BucketName": "{{S3Output}}",
+                  "OutputS3KeyPrefix": "automations",
+                  "CloudWatchOutputConfig" : { 
+                    "CloudWatchLogGroupName": "/aws/ssm/runCommand",
+                    "CloudWatchOutputEnabled": true
+                  },
+                  "InstanceIds": [
+                    "{{ LaunchInstance.InstanceIds }}"
+                  ],
+                  "Parameters": {
+                    "commands": [
+                        "$zipFilename = 'AWSUpdateWindowsInstance_1_4_3_1.zip'",
+                        "$zipFileHash = '9FC935717FFC2CB5476B06DFAC07B6133F483AE5402CAE8035F39A2D74FBB1BF'",
+                        "$moduleName = 'AWSUpdateWindowsInstance'",
+                        "$tempPath = $env:TEMP",
+                        "$moduleDirectory = Join-Path $tempPath -ChildPath $moduleName",
+                        "$moduleZipFilePath = Join-Path $tempPath -ChildPath $zipFilename",
+                        "$moduleManifestPath = Join-Path $moduleDirectory -ChildPath ('{0}.psd1' -f $moduleName)",
+                        "[string[]] $includeList = ('{{ IncludeKbs }}').Split(',',[System.StringSplitOptions]::RemoveEmptyEntries)",
+                        "[string[]] $excludeList = ('{{ ExcludeKbs }}').Split(',',[System.StringSplitOptions]::RemoveEmptyEntries)",
+                        "[string[]] $categoryList = ('{{ Categories }}').Split(',',[System.StringSplitOptions]::RemoveEmptyEntries)",
+                        "[string[]] $severityLevelList = ('{{ SeverityLevels }}').Split(',',[System.StringSplitOptions]::RemoveEmptyEntries)",
+                        "[string]$publishedDateAfter = '{{ PublishedDateAfter }}'",
+                        "[string]$publishedDateBefore = '{{ PublishedDateBefore }}'",
+                        "[string]$publishedDaysOld = '{{ PublishedDaysOld }}'",
+                        "",
+                        "$ssmAgentService = Get-ItemProperty 'HKLM:SYSTEM\\CurrentControlSet\\Services\\AmazonSSMAgent\\' -ErrorAction SilentlyContinue",
+                        "if($ssmAgentService -and $ssmAgentService.Version -ge '2.0.533.0') {",
+                        "  $region = $env:AWS_SSM_REGION_NAME",
+                        "}",
+                        "",
+                        "if(-not $region) {",
+                        "  try {",
+                        "    $identityDocumentUrl = 'http://169.254.169.254/latest/dynamic/instance-identity/document'",
+                        "    $region = ((Invoke-WebRequest -UseBasicParsing -uri $identityDocumentUrl).Content | ConvertFrom-Json).region",
+                        "  } catch {",
+                        "    $region = 'us-east-1'",
+                        "  }",
+                        "}",
+                        "",
+                        "function Main {",
+                        "  Test-PreCondition",
+                        "  Clear-WindowsUpdateModule",
+                        "  Get-WindowsUpdateModule",
+                        "  Expand-WindowsUpdateModule",
+                        "  if ([Environment]::OSVersion.Version.Major -ge 10) {",
+                        "    Invoke-UpdateEC2Launch",
+                        "  } else {",
+                        "    Invoke-UpdateEC2Config",
+                        "  }",
+                        "}",
+                        "",
+                        "function Test-PreCondition {",
+                        "  try {",
+                        "    $osversion = [Environment]::OSVersion.Version",
+                        "    if ($osversion.Major -le 5) {",
+                        "      Write-Host 'This document is not supported on Windows Server 2003 or earlier.'",
+                        "      Exit -1",
+                        "    }",
+                        "",
+                        "    if ($osversion.Version -ge '10.0') {",
+                        "      $sku = (Get-CimInstance -ClassName Win32_OperatingSystem).OperatingSystemSKU",
+                        "      if ($sku -eq 143 -or $sku -eq 144) {",
+                        "        Write-Host 'This document is not supported on Windows 2016 Nano Server.'",
+                        "        Exit -1",
+                        "      }",
+                        "    }",
+                        "  } catch {",
+                        "    Write-Host 'Executing Test-PreCondition resulted in error: $($_)'",
+                        "    Exit -1",
+                        "  }",
+                        "}",
+                        "",
+                        "function Clear-WindowsUpdateModule {",
+                        "  try {",
+                        "    if (Test-Path $moduleDirectory) {",
+                        "      Remove-Item $moduleDirectory -Force -Recurse",
+                        "    }",
+                        "    if (Test-Path $moduleZipFilePath) {",
+                        "      Remove-Item $moduleZipFilePath -Force",
+                        "    }",
+                        "  } catch {",
+                        "    Write-Host \"Cleaning Windows update module resulted in error: $($_)\"",
+                        "  }",
+                        "}",
+                        "",
+                        "function Get-WindowsUpdateModule {",
+                        "  try {",
+                        "    if ($region.StartsWith('cn-')) {",
+                        "      $s3Location = 'https://s3.{0}.amazonaws.com.cn/aws-windows-downloads-{0}/PSModules/AWSUpdateWindowsInstance/{1}'",
+                        "    } elseif($region.StartsWith('us-gov-')) {",
+                        "      $s3Location = 'https://s3-fips-{0}.amazonaws.com/aws-windows-downloads-{0}/PSModules/AWSUpdateWindowsInstance/{1}'",
+                        "    } elseif($region -eq 'us-east-1') {",
+                        "      $s3Location = 'https://s3.amazonaws.com/aws-windows-downloads-{0}/PSModules/AWSUpdateWindowsInstance/{1}'",
+                        "    } else {",
+                        "      $s3Location = 'https://aws-windows-downloads-{0}.s3.amazonaws.com/PSModules/AWSUpdateWindowsInstance/{1}'",
+                        "    }",
+                        "",
+                        "    $source = $s3Location -f $region, $zipFilename",
+                        "    $moduleLocalPath = Join-Path $tempPath -ChildPath $zipFilename",
+                        "    Start-BitsTransfer -Source $source -Destination $moduleLocalPath",
+                        "",
+                        "    $fileStream = New-Object System.IO.FileStream($moduleLocalPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read)",
+                        "    $sha256 = [System.Security.Cryptography.HashAlgorithm]::Create('System.Security.Cryptography.SHA256CryptoServiceProvider')",
+                        "    $currentHash = [System.BitConverter]::ToString($sha256.ComputeHash($fileStream), 0).Replace('-', '').ToLowerInvariant()",
+                        "    $sha256.Dispose()",
+                        "    $fileStream.Dispose()",
+                        "",
+                        "    if ($currentHash -ne $zipFileHash) {",
+                        "      Write-Host 'The SHA hash of the module does not match the expected value.'",
+                        "      Exit -1",
+                        "    }",
+                        "  } catch {",
+                        "    Write-Host ('Error encountered while getting the module: {0}.' -f $_.Exception.Message)",
+                        "    Exit -1",
+                        "  }",
+                        "}",
+                        "",
+                        "function Expand-WindowsUpdateModule {",
+                        "  try {",
+                        "    [System.Reflection.Assembly]::LoadWithPartialName('System.IO.Compression.FileSystem') | Out-Null",
+                        "    $zip = [System.IO.Compression.ZipFile]::OpenRead($moduleZipFilePath)",
+                        "    foreach ($item in $zip.Entries) {",
+                        "      $extractPath = Join-Path $tempPath -ChildPath $item.FullName",
+                        "      if ($item.Length -eq 0) {",
+                        "        if (-not (Test-Path $extractPath)) {",
+                        "          New-Item $extractPath -ItemType Directory | Out-Null",
+                        "        }",
+                        "      } else {",
+                        "        $parentPath = Split-Path $extractPath",
+                        "        if (-not (Test-Path $parentPath)) {",
+                        "          New-Item $parentPath -ItemType Directory | Out-Null",
+                        "        }",
+                        "        [System.IO.Compression.ZipFileExtensions]::ExtractToFile($item, $extractPath, $true)",
+                        "      }",
+                        "    }",
+                        "  } catch {",
+                        "    Write-Host ('Error encountered when extracting module file: {0}.' -f $_.Exception.Message)",
+                        "    Exit -1",
+                        "  } finally {",
+                        "    $zip.Dispose()",
+                        "  }",
+                        "}",
+                        "",
+                        "function Invoke-UpdateEC2Config {",
+                        "  try {",
+                        "    Import-Module $moduleManifestPath",
+                        "    $command = \"Install-AwsUwiEC2Config -Region $region\"",
+                        "    if($id) { $command += \" -Id $($id)\"}",
+                        "    Invoke-Expression $command",
+                        "  } catch {",
+                        "    Write-Host 'Executing Invoke-AwsUwiEC2Config resulted in error: $($_)'",
+                        "    Exit -1",
+                        "  }",
+                        "}",
+                        "",
+                        "function Invoke-UpdateEC2Launch {",
+                        "  try {",
+                        "    Import-Module $moduleManifestPath",
+                        "    $command = 'Install-AwsUwiEC2Launch'",
+                        "    if($id) { $command += \" -Id $($id)\" }",
+                        "    Invoke-Expression $command",
+                        "  } catch {",
+                        "    Write-Host 'Executing Invoke-AwsUwiEC2Launch resulted in error: $($_)'",
+                        "    Exit -1",
+                        "  }",
+                        "}",
+                        "",
+                        "Main"
+                    ]
+                  }
+              }
+            },
+            {
+              "name": "UpdateSSMAgent",
+              "action": "aws:runCommand",
+              "maxAttempts": 3,
+              "onFailure": "Abort",
+              "timeoutSeconds": 600,
+              "inputs": {
+                  "DocumentName": "AWS-UpdateSSMAgent",
+                  "OutputS3BucketName": "{{S3Output}}",
+                  "OutputS3KeyPrefix": "automations",
+                  "CloudWatchOutputConfig" : { 
+                    "CloudWatchLogGroupName": "/aws/ssm/runCommand",
+                    "CloudWatchOutputEnabled": true
+                  },
+                  "InstanceIds": [
+                    "{{ LaunchInstance.InstanceIds }}"
+                  ],
+                  "Parameters": {
+                    "allowDowngrade": "false"
+                  }
+              }
+            },
+            {
+              "name": "InstallAmazonCloudWatchAgent",
+              "action": "aws:runCommand",
+              "maxAttempts": 3,
+              "onFailure": "Abort",
+              "timeoutSeconds": 600,
+              "inputs": {
+                "DocumentName": "AWS-ConfigureAWSPackage",
+                "OutputS3BucketName": "{{S3Output}}",
+                "OutputS3KeyPrefix": "automations",
+                "CloudWatchOutputConfig" : { 
+                  "CloudWatchLogGroupName": "/aws/ssm/runCommand",
+                  "CloudWatchOutputEnabled": true
+                },
+                "InstanceIds": [
+                  "{{LaunchInstance.InstanceIds}}"
+                ],
+                "Parameters": {
+                  "name": "AmazonCloudWatchAgent",
+                  "action": "Install"
+                }
+              }
+            },
+            {
+              "name": "InstallWindowsUpdates",
+              "action": "aws:runCommand",
+              "maxAttempts": 2,
+              "onFailure": "Abort",
+              "timeoutSeconds": 14400,
+              "inputs": {
+                  "DocumentName": "AWS-InstallWindowsUpdates",
+                  "OutputS3BucketName": "{{S3Output}}",
+                  "OutputS3KeyPrefix": "automations",
+                  "CloudWatchOutputConfig" : { 
+                    "CloudWatchLogGroupName": "/aws/ssm/runCommand",
+                    "CloudWatchOutputEnabled": true
+                  },
+                  "InstanceIds": [
+                    "{{ LaunchInstance.InstanceIds }}"
+                  ],
+                  "Parameters": {
+                    "Action": "Install",
+                    "IncludeKbs": "{{ IncludeKbs }}",
+                    "ExcludeKbs": "{{ ExcludeKbs }}",
+                    "Categories": "{{ Categories }}",
+                    "SeverityLevels": "{{ SeverityLevels }}",
+                    "PublishedDaysOld": "{{ PublishedDaysOld }}",
+                    "PublishedDateAfter": "{{ PublishedDateAfter }}",
+                    "PublishedDateBefore": "{{ PublishedDateBefore }}"
+                  }
+              }
+            },
+            {
+              "name": "RunPostUpdateScript",
+              "action": "aws:runCommand",
+              "maxAttempts": 3,
+              "onFailure": "Abort",
+              "timeoutSeconds": 1800,
+              "inputs": {
+                  "DocumentName": "AWS-RunPowerShellScript",
+                  "OutputS3BucketName": "{{S3Output}}",
+                  "OutputS3KeyPrefix": "automations",
+                  "CloudWatchOutputConfig" : { 
+                    "CloudWatchLogGroupName": "/aws/ssm/runCommand",
+                    "CloudWatchOutputEnabled": true
+                  },
+                  "InstanceIds": [
+                    "{{ LaunchInstance.InstanceIds }}"
+                  ],
+                  "Parameters": {
+                    "commands": "{{ PostUpdateScript }}"
+                  }
+              }
+            },
+            {
+              "name": "RunSysprepGeneralize",
+              "action": "aws:runCommand",
+              "maxAttempts": 3,
+              "onFailure": "Abort",
+              "timeoutSeconds": 600,
+              "inputs": {
+                  "DocumentName": "AWSEC2-RunSysprep",
+                  "OutputS3BucketName": "{{S3Output}}",
+                  "OutputS3KeyPrefix": "automations",
+                  "CloudWatchOutputConfig" : { 
+                    "CloudWatchLogGroupName": "/aws/ssm/runCommand",
+                    "CloudWatchOutputEnabled": true
+                  },
+                  "InstanceIds": [
+                    "{{LaunchInstance.InstanceIds}}"
+                  ],
+                  "Parameters": {
+                    "Id": "{{automation:EXECUTION_ID}}"
+                  }
+              }
+            },
+            {
+              "name": "StopInstance",
+              "action": "aws:changeInstanceState",
+              "maxAttempts": 3,
+              "timeoutSeconds": 7200,
+              "onFailure": "Abort",
+              "inputs": {
+                  "InstanceIds": [
+                    "{{ LaunchInstance.InstanceIds }}"
+                  ],
+                  "CheckStateOnly": false,
+                  "DesiredState": "stopped"
+              }
+            },
+            {
+              "name": "CreateImage",
+              "action": "aws:createImage",
+              "maxAttempts": 3,
+              "onFailure": "Abort",
+              "inputs": {
+                  "InstanceId": "{{ LaunchInstance.InstanceIds }}",
+                  "ImageName": "{{ TargetAmiName }}",
+                  "NoReboot": true,
+                  "ImageDescription": "AMI Generated by EC2 Automation on {{global:DATE_TIME}} from {{SourceAmiId}}"
+              }
+            },
+            {
+              "name": "tagImage",
+              "action": "aws:createTags",
+              "maxAttempts": 3,
+              "onFailure": "Continue",
+              "inputs": {
+                  "ResourceType": "EC2",
+                  "ResourceIds": [
+                    "{{CreateImage.ImageId}}"
+                  ],
+                  "Tags": [
+                    {
+                        "Key": "Name",
+                        "Value": "{{Prefix}}_AMI_{{AmiType}}_Latest"
+                    }
+                  ]
+              }
+            },
+            {
+              "name": "TerminateInstance",
+              "action": "aws:changeInstanceState",
+              "maxAttempts": 3,
+              "onFailure": "Abort",
+              "inputs": {
+                  "InstanceIds": [
+                    "{{ LaunchInstance.InstanceIds }}"
+                  ],
+                  "DesiredState": "terminated"
+              }
+            },
+            {
+              "name": "Lambda_Rotate_AMI",
+              "action": "aws:invokeLambdaFunction",
+              "timeoutSeconds": 120,
+              "maxAttempts": 3,
+              "onFailure": "Continue",
+              "inputs": {
+                  "FunctionName": "{{RotateAMIFunction}}",
+                  "Payload": "{\"aminame\":\"{{Prefix}}_AMI_{{AmiType}}_\",\"accounts\":\"{{Accounts}}\"}"
+              }
+            }
+        ],
+        "outputs": [
+            "CreateImage.ImageId"
+        ]
+      }
+      Tags:
+      - Key: Name
+        Value: DefaultWindowsAmiDocument

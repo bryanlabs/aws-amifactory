@@ -8,16 +8,16 @@ PREFIX="$(grep PREFIX= build.sh | cut -d '"' -f2)"
 
 buildAmiLATESTVERSION=$(aws s3api list-object-versions --bucket $LAMBDACODEBUCKET --prefix $PREFIX/buildAmi.zip | jq '.Versions[] | select(.IsLatest==true)' | jq -r .VersionId)
 rotateAmiLATESTVERSION=$(aws s3api list-object-versions --bucket $LAMBDACODEBUCKET --prefix $PREFIX/rotateAmi.zip | jq '.Versions[] | select(.IsLatest==true)' | jq -r .VersionId)
-DestSubnetId="subnet-0608463b2ef22881b"
-ImageBuilderVPCId="vpc-0e7574aadd97d2011"
-KeyName="BRYANLABS-AWS"
-AuthorizedKey="CHANGEME"
+DestSubnetId="subnet-0c14916306ed3ede3"
+ImageBuilderVPCId="vpc-045381e815963d0e6"
+KeyName="altitude.cloud"
+AuthorizedKey='CHANGEME'
 
 export APPNAME LAMBDACODEBUCKET PREFIX LATESTVERSION DestSubnetId SecurityGroupId KeyName AuthorizedKey
 
 # Download template from Source
 aws s3 cp "s3://$LAMBDACODEBUCKET/$PREFIX/$APPNAME".yml .
-
+# cp cloudformation.yml $APPNAME.yml
 
 # Check File Size
 SIZE=$(wc -c "$APPNAME".yml | cut -d ' ' -f1)
@@ -39,20 +39,20 @@ export CLI_OPTIONS CLI_OPTIONS S3URL
 # Handle Large CFTs
 
 if (( SIZE > 51200 )); then
-    if aws cloudformation describe-stacks --stack-name $APPNAME > /dev/null; then
-        aws cloudformation update-stack --stack-name "$APPNAME" --template-url "$S3URL/$LAMBDACODEBUCKET/$PREFIX/$APPNAME".yml \
+    if aws cloudformation --region us-east-1 describe-stacks --stack-name $APPNAME > /dev/null; then
+        aws cloudformation --region us-east-1 update-stack --stack-name "$APPNAME" --template-url "$S3URL/$LAMBDACODEBUCKET/$PREFIX/$APPNAME".yml \
         --capabilities CAPABILITY_NAMED_IAM $CLI_OPTIONS
     else
-        aws cloudformation create-stack --stack-name "$APPNAME" --template-url "$S3URL/$LAMBDACODEBUCKET/$PREFIX/$APPNAME".yml \
+        aws cloudformation --region us-east-1 create-stack --stack-name "$APPNAME" --template-url "$S3URL/$LAMBDACODEBUCKET/$PREFIX/$APPNAME".yml \
         --capabilities CAPABILITY_NAMED_IAM $CLI_OPTIONS
     fi
     
 else
-    if aws cloudformation describe-stacks --stack-name $APPNAME > /dev/null; then
-        aws cloudformation update-stack --stack-name "$APPNAME" --template-body "file://$APPNAME".yml \
+    if aws cloudformation --region us-east-1 describe-stacks --stack-name $APPNAME > /dev/null; then
+        aws cloudformation --region us-east-1 update-stack --stack-name "$APPNAME" --template-body "file://$APPNAME".yml \
         --capabilities CAPABILITY_NAMED_IAM $CLI_OPTIONS
     else
-        aws cloudformation create-stack --stack-name "$APPNAME" --template-body "file://$APPNAME".yml \
+        aws cloudformation --region us-east-1 create-stack --stack-name "$APPNAME" --template-body "file://$APPNAME".yml \
         --capabilities CAPABILITY_NAMED_IAM $CLI_OPTIONS
     fi
 fi

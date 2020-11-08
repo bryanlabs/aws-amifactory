@@ -2,8 +2,8 @@
 set -e
 
 APPNAME="AmiFactory"
-LAMBDACODEBUCKET="bryanlabs-public"
-PREFIX="blog/amifactory"
+LAMBDACODEBUCKET="altitude-installers"
+PREFIX="amifactory"
 
 #Build the Lambda Executable and archive.
 echo "### Building for Lambda."

@@ -1,11 +1,12 @@
 {
     "amis": [
         {
-            "imageName": "Webserver",
-            "sourceImage": "ami-0de53d8956e8dcf80",
+            "imageName": "AMC-RHEL7",
+            "sourceImage": "ami-007ebc32ba5ba7be6",
             "bootstrapUrl": "https://raw.githubusercontent.com/bryanlabs/aws-amifactory/master/bootstrap/webserver.sh",
             "accounts": [
-                "CHANGEME"
+                "490098814801",
+                "523710455150"
             ],
             "automationDocument": "DefaultLinuxAmiDocument"
         }
